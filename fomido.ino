@@ -3,247 +3,430 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <Adafruit_NeoPixel.h>
-#include <Adafruit_SSD1306.h>
+#include <U8g2lib.h>
 #include <Preferences.h>
 #include <Wire.h>
-// === Wi-Fi Credentials ===
+
+// =====================
+// Wi-Fi / OTA
+// =====================
 const char* WIFI_SSID = "FritzseBadmuts";
 const char* WIFI_PASS = "There is no sp00n!";
-// === USB / MIDI ===
+
+static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+static constexpr uint32_t WIFI_RETRY_INTERVAL_MS  = 10000;
+
+static const char* OTA_HOSTNAME = "ESP32S3-FootCtrl";
+static const char* OTA_PASSWORD = "Nexus8";
+
+// =====================
+// USB / MIDI
+// =====================
 USBMIDI MIDI;
-// === Hardware Configuration ===
-const int POT_PIN = 4;
-const int RGB_PIN = 48;
+
+// =====================
+// Hardware Configuration
+// =====================
+const int POT_PIN   = 4;
+const int RGB_PIN   = 48;
 const int RGB_COUNT = 1;
-// === OLED Configuration ===
-#define I2C_SDA 10
-#define I2C_SCL 9
-#define SCREEN_WIDTH 128
+
+// BOOT button (ESP32-S3)
+// static constexpr int BOOT_PIN = 0;                 // GPIO0, active LOW
+static constexpr uint32_t BOOT_HOLD_MS = 5000;     // 5 seconds
+
+// =====================
+// OLED Configuration
+// =====================
+#define I2C_SDA 9
+#define I2C_SCL 10
+#define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-// === MIDI Settings ===
-const uint8_t MIDI_CHANNEL = 11;
+
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+// =====================
+// MIDI Settings
+// =====================
+const uint8_t MIDI_CHANNEL   = 11;
 const uint8_t CONTROLLER_NUM = 4;
-// === Variables ===
-uint8_t lastValue = 255;
-float smoothRaw = 0;
-int calibMin = 0;
-int calibMax = 4095;
+
+// =====================
+// Behavior tuning
+// =====================
+static constexpr float    SMOOTH_ALPHA  = 0.12f;
+static constexpr uint8_t  MIDI_DEADBAND = 1;
+static constexpr uint32_t MIDI_RATE_MS  = 5;
+static constexpr int      CAL_MIN_SPAN  = 200;
+
+// Hold UI update rate
+static constexpr uint32_t HOLD_UI_PERIOD_MS = 33; // ~30 FPS
+
+// =====================
+// Globals
+// =====================
 Adafruit_NeoPixel rgb(RGB_COUNT, RGB_PIN, NEO_GRB + NEO_KHZ800);
 Preferences prefs;
-// === Pedal Bitmap (64x32, improved guitar effects foot pedal) ===
-const unsigned char PROGMEM pedalIcon64[] = {
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  // Row 0
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  // 1
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  // 2
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,  // 3
-  0x00,0x07,0xFF,0xFF,0xFF,0xFE,0x00,0x00,  // 4  Rounded top
-  0x00,0x3F,0xFF,0xFF,0xFF,0xFF,0xE0,0x00,  // 5
-  0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xF8,0x00,  // 6
-  0x03,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,0x00,  // 7  Main body
-  0x07,0xFF,0xC0,0x00,0x00,0xFF,0xFF,0x00,  // 8  Footswitch circle starts (left)
-  0x0F,0xFF,0x00,0x00,0x00,0x3F,0xFF,0x80,  // 9
-  0x1F,0xFE,0x00,0x00,0x00,0x0F,0xFF,0xC0,  // 10
-  0x1F,0xFC,0x00,0x00,0x00,0x07,0xFF,0xC0,  // 11 Circle center
-  0x3F,0xFC,0x00,0x00,0x00,0x07,0xFF,0xE0,  // 12
-  0x3F,0xF8,0x00,0x00,0x00,0x03,0xFF,0xE0,  // 13
-  0x7F,0xF8,0x00,0x00,0x00,0x03,0xFF,0xF0,  // 14
-  0x7F,0xF0,0x00,0x00,0x00,0x01,0xFF,0xF0,  // 15
-  0x7F,0xF0,0x18,0x18,0x30,0x01,0xFF,0xF0,  // 16 Knobs start (small circles on right)
-  0x7F,0xF0,0x38,0x1C,0x70,0x01,0xFF,0xF0,  // 17
-  0x7F,0xF0,0x70,0x0E,0x70,0x01,0xFF,0xF0,  // 18
-  0x7F,0xF0,0x70,0x0E,0x70,0x01,0xFF,0xF0,  // 19
-  0x7F,0xF0,0x70,0x0E,0x70,0x01,0xFF,0xF0,  // 20
-  0x7F,0xF0,0x38,0x1C,0x70,0x01,0xFF,0xF0,  // 21
-  0x7F,0xF0,0x18,0x18,0x30,0x01,0xFF,0xF0,  // 22
-  0xFF,0xF0,0x00,0x00,0x00,0x01,0xFF,0xF8,  // 23
-  0xFF,0xF8,0x00,0x00,0x00,0x03,0xFF,0xF8,  // 24 Slanted treadle top
-  0xFF,0xFF,0x00,0x00,0x00,0x0F,0xFF,0xFC,  // 25
-  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFC,  // 26 Full treadle
-  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFC,  // 27
-  0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,  // 28 Bottom rounded
-  0x7F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,  // 29
-  0x3F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFC,  // 30
-  0x0F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xF8   // 31
-};
-// === Function Prototypes ===
-void calibratePedal(bool force = false);
-void setPedalColor(uint8_t midiValue);
-void saveCalibration();
-void loadCalibration();
-void bootAnimation();
-void updateDisplay(uint8_t midiValue, bool showCalibrating = false);
-void showBootSplash();
-// === Setup ===
-void setup() {
-  USB.manufacturerName("Egberts");
-  USB.productName("ESP32-S3 Foot Controller");
-  USB.serialNumber("FC-002");
-  USB.begin();
-  MIDI.begin();
-  Serial.begin(115200);
-  delay(200);
-  analogReadResolution(12);
-  pinMode(POT_PIN, INPUT);
-  rgb.begin();
-  rgb.setBrightness(50);
-  rgb.show();
-  prefs.begin("pedalcal", false);
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(400000);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED not found!");
-  } else {
-    showBootSplash();
-  }
-  bootAnimation();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(250);
-    Serial.print(".");
-  }
-  Serial.printf("\nConnected! IP: %s\n", WiFi.localIP().toString().c_str());
-  ArduinoOTA.setHostname("ESP32S3-FootCtrl");
-  ArduinoOTA.setPassword("Nexus8");
-  ArduinoOTA.begin();
-  loadCalibration();
-  calibratePedal(false);
-  Serial.printf("Calibration range: Min=%d Max=%d\n", calibMin, calibMax);
-  Serial.println("ESP32-S3 USB MIDI Foot Controller ready.");
+
+float smoothRaw = 0;
+bool smoothInit = false;
+
+int calibMin = 0;
+int calibMax = 4095;
+
+uint8_t lastMidiSent  = 255;
+uint8_t lastLedMidi   = 255;
+uint8_t lastShownMidi = 255;
+
+uint32_t lastMidiMs = 0;
+
+// BOOT button state
+bool bootArmed = true;           // triggers once per press
+uint32_t bootPressStart = 0;
+uint32_t lastHoldUiMs = 0;
+bool holdUiActive = false;
+
+// Wi-Fi retry state
+uint32_t lastWifiTryMs = 0;
+
+// =====================
+// Calibration storage
+// =====================
+bool hasSavedCalibration() {
+  return prefs.isKey("min") && prefs.isKey("max");
 }
-// === Loop ===
-void loop() {
-  ArduinoOTA.handle();
-  int raw = analogRead(POT_PIN);
-  smoothRaw = (smoothRaw * 0.9f) + (raw * 0.1f);
-  int constrained = constrain((int)smoothRaw, calibMin, calibMax);
-  uint8_t midiValue = map(constrained, calibMin, calibMax, 0, 127);
-  if (abs(midiValue - lastValue) >= 1) {
-    MIDI.controlChange(CONTROLLER_NUM, midiValue, MIDI_CHANNEL);
-    static unsigned long lastPrint = 0;
-    if (millis() - lastPrint > 200) {
-      Serial.printf("CC %u -> %u (Ch %u)\n", CONTROLLER_NUM, midiValue, MIDI_CHANNEL);
-      lastPrint = millis();
-    }
-    lastValue = midiValue;
-  }
-  setPedalColor(midiValue);
-  updateDisplay(midiValue);
-  delay(10);
+
+bool validateCalibration() {
+  int mn = calibMin, mx = calibMax;
+  if (mn > mx) { int t = mn; mn = mx; mx = t; }
+  return (mx - mn) >= CAL_MIN_SPAN && mn >= 0 && mx <= 4095;
 }
-// === Boot Splash (no fade) ===
-void showBootSplash() {
-  display.clearDisplay();
-  display.drawBitmap((SCREEN_WIDTH - 64) / 2, (SCREEN_HEIGHT - 32) / 2 - 8,
-                     pedalIcon64, 64, 32, SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor((SCREEN_WIDTH - 72) / 2, (SCREEN_HEIGHT - 32) / 2 + 20);
-  display.println("Foot Ctrl v1.0");
-  display.display();
-  delay(1000); // Show for 1 second
-  display.clearDisplay();
-  display.display();
-}
-// === Calibration ===
-void calibratePedal(bool force) {
-  bool hasData = prefs.isKey("min") && prefs.isKey("max");
-  if (hasData && !force) {
-    Serial.println("Using saved calibration.");
-    return;
-  }
-  Serial.println("\n=== Pedal Calibration ===");
-  Serial.println("Move pedal full range for 5 s...");
-  calibMin = 4095;
-  calibMax = 0;
-  unsigned long start = millis();
-  while (millis() - start < 5000) {
-    int val = analogRead(POT_PIN);
-    if (val < calibMin) calibMin = val;
-    if (val > calibMax) calibMax = val;
-    bool on = (millis() / 200) % 2;
-    rgb.setPixelColor(0, on ? rgb.Color(0, 0, 255) : rgb.Color(0, 0, 0));
-    rgb.show();
-    updateDisplay(0, true);
-    delay(10);
-  }
-  rgb.setPixelColor(0, rgb.Color(0, 255, 0));
-  rgb.show();
-  saveCalibration();
-  Serial.printf("Calibration complete! Min: %d Max: %d\n", calibMin, calibMax);
-  delay(1000);
-  rgb.clear();
-  rgb.show();
-}
-// === Save / Load Calibration ===
+
 void saveCalibration() {
   prefs.putInt("min", calibMin);
   prefs.putInt("max", calibMax);
-  Serial.println("Calibration saved to NVS.");
 }
+
 void loadCalibration() {
-  if (prefs.isKey("min") && prefs.isKey("max")) {
+  if (hasSavedCalibration()) {
     calibMin = prefs.getInt("min", 0);
     calibMax = prefs.getInt("max", 4095);
-    Serial.println("Loaded calibration from flash.");
   } else {
     calibMin = 0;
     calibMax = 4095;
-    Serial.println("No saved calibration found; using defaults.");
   }
 }
-// === Boot Animation (RGB) ===
-void bootAnimation() {
-  for (int i = 0; i <= 127; i += 2) { setPedalColor(i); delay(5); }
-  for (int i = 127; i >= 0; i -= 2) { setPedalColor(i); delay(5); }
-  rgb.clear(); rgb.show();
-}
-// === RGB Gradient ===
+
+// =====================
+// RGB
+// =====================
 void setPedalColor(uint8_t midiValue) {
-  uint8_t red, green = 0, blue;
+  uint8_t r, g = 0, b;
   if (midiValue < 64) {
-    red = map(midiValue, 0, 63, 0, 128);
-    blue = map(midiValue, 0, 63, 255, 128);
+    r = map(midiValue, 0, 63, 0, 128);
+    b = map(midiValue, 0, 63, 255, 128);
   } else {
-    red = map(midiValue, 64, 127, 128, 255);
-    blue = map(midiValue, 64, 127, 128, 0);
+    r = map(midiValue, 64, 127, 128, 255);
+    b = map(midiValue, 64, 127, 128, 0);
   }
-  rgb.setPixelColor(0, rgb.Color(red, green, blue));
+  rgb.setPixelColor(0, rgb.Color(r, g, b));
   rgb.show();
 }
-// === OLED Display Update ===
-void updateDisplay(uint8_t midiValue, bool showCalibrating) {
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate < 100) return;
-  lastUpdate = millis();
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  if (showCalibrating) {
-    display.setTextSize(1);
-    display.setCursor(20, 20);
-    display.println("Calibrating...");
-    display.setCursor(10, 40);
-    display.println("Move pedal full range");
-    display.display();
+
+// =====================
+// OLED (normal)
+// =====================
+void updateDisplay(uint8_t midiValue) {
+  static uint32_t last = 0;
+  if (millis() - last < 100 && midiValue == lastShownMidi) return;
+  last = millis();
+  lastShownMidi = midiValue;
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x12_tr);
+
+  char top[24];
+  snprintf(top, sizeof(top), "CC%u Ch%u", CONTROLLER_NUM, MIDI_CHANNEL);
+  u8g2.drawStr(0, 10, top);
+
+  u8g2.setFont(u8g2_font_helvB24_tn);
+  char val[5];
+  snprintf(val, sizeof(val), "%3u", midiValue);
+  int w = u8g2.getStrWidth(val);
+  u8g2.drawStr((SCREEN_WIDTH - w) / 2, 38, val);
+
+  int bw = map(midiValue, 0, 127, 0, SCREEN_WIDTH - 10);
+  u8g2.drawFrame(4, 44, SCREEN_WIDTH - 8, 10);
+  u8g2.drawBox(5, 45, bw, 8);
+
+  u8g2.setFont(u8g2_font_6x12_tr);
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    u8g2.drawStr(0, 62, ip.c_str());
+  } else {
+    u8g2.drawStr(0, 62, "Wi-Fi: offline");
+  }
+
+  u8g2.sendBuffer();
+}
+
+// =====================
+// OLED (hold-to-calibrate UI)
+// =====================
+void updateHoldUI(float pct) {
+  pct = constrain(pct, 0.0f, 1.0f);
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_helvR12_tr);
+  u8g2.drawStr(8, 18, "Hold BOOT to");
+  u8g2.drawStr(20, 36, "Calibrate (5s)");
+
+  int bw = SCREEN_WIDTH - 16;
+  u8g2.drawFrame(8, 48, bw, 10);
+  u8g2.drawBox(9, 49, (int)(bw * pct), 8);
+
+  u8g2.setFont(u8g2_font_6x12_tr);
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    u8g2.drawStr(0, 62, ip.c_str());
+  } else {
+    u8g2.drawStr(0, 62, "Wi-Fi: offline");
+  }
+
+  u8g2.sendBuffer();
+}
+
+// =====================
+// Calibration (blocking ~5s)
+// =====================
+void calibratePedal(bool force) {
+  if (!force) return;
+
+  calibMin = 4095;
+  calibMax = 0;
+
+  uint32_t start = millis();
+  while (millis() - start < 5000) {
+    // Best-effort keep OTA alive during calibration
+    if (WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+
+    int v = analogRead(POT_PIN);
+    calibMin = min(calibMin, v);
+    calibMax = max(calibMax, v);
+
+    bool on = ((millis() / 200) % 2);
+    rgb.setPixelColor(0, on ? rgb.Color(0, 0, 255) : 0);
+    rgb.show();
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_helvR12_tr);
+    u8g2.drawStr(18, 30, "Calibrating...");
+    u8g2.sendBuffer();
+
+    delay(10);
+  }
+
+  if (!validateCalibration()) {
+    calibMin = 0;
+    calibMax = 4095;
+  } else {
+    saveCalibration();
+  }
+
+  rgb.setPixelColor(0, rgb.Color(0, 255, 0));
+  rgb.show();
+  delay(500);
+  rgb.clear();
+  rgb.show();
+
+  // Force refresh after returning to normal mode
+  lastShownMidi = 255;
+  lastLedMidi   = 255;
+  lastMidiSent  = 255;
+}
+
+// =====================
+// BOOT button handler
+// (only triggers calibration after 5s hold)
+// =====================
+void handleBootButtonCalibration() {
+  bool pressed = (digitalRead(BOOT_PIN) == LOW);
+
+  if (!pressed) {
+    bootPressStart = 0;
+    bootArmed = true;
+    lastHoldUiMs = 0;
+    if (holdUiActive) {
+      lastShownMidi = 255;
+      lastLedMidi = 255;
+    }
+    holdUiActive = false;
     return;
   }
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.printf("CC%u Ch%u", CONTROLLER_NUM, MIDI_CHANNEL);
-  display.setTextSize(2);
-  display.setCursor(40, 15);
-  display.printf("%3u", midiValue);
-  int barWidth = map(midiValue, 0, 127, 0, SCREEN_WIDTH - 10);
-  display.drawRect(0, 42, SCREEN_WIDTH - 10, 10, SSD1306_WHITE);
-  display.fillRect(0, 42, barWidth, 10, SSD1306_WHITE);
-  display.setTextSize(1);
-  display.setCursor(0, 55);
-  if (WiFi.status() == WL_CONNECTED)
-    display.printf("%s", WiFi.localIP().toString().c_str());
-  else
-    display.print("Wi-Fi not connected");
-  display.display();
+
+  holdUiActive = true;
+
+  // If already triggered, wait for release
+  if (!bootArmed) return;
+
+  if (bootPressStart == 0) bootPressStart = millis();
+  uint32_t held = millis() - bootPressStart;
+
+  // Throttle hold UI + LED
+  uint32_t now = millis();
+  if (now - lastHoldUiMs >= HOLD_UI_PERIOD_MS) {
+    lastHoldUiMs = now;
+
+    float pct = (float)held / (float)BOOT_HOLD_MS;
+    updateHoldUI(pct);
+
+    // Pulsing yellow LED while holding
+    uint32_t t = now % 600;
+    uint8_t wave = (t < 300) ? t : (600 - t);
+    float base = 0.2f + 0.8f * constrain(pct, 0.0f, 1.0f);
+    float pulse = 0.4f + 0.6f * ((float)wave / 300.0f);
+    float b = constrain(base * pulse, 0.0f, 1.0f);
+
+    rgb.setPixelColor(0, rgb.Color((uint8_t)(255 * b), (uint8_t)(200 * b), 0));
+    rgb.show();
+  }
+
+  // Trigger once after 5s
+  if (held >= BOOT_HOLD_MS) {
+    bootArmed = false;
+    bootPressStart = 0;
+    calibratePedal(true);
+  }
+}
+
+// =====================
+// Wi-Fi / OTA helpers
+// =====================
+void connectWiFiWithTimeout() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("Connecting to Wi-Fi");
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(250);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nConnected! IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\nWi-Fi connect timed out. Continuing without Wi-Fi/OTA.");
+  }
+}
+
+void maintainWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  uint32_t now = millis();
+  if (now - lastWifiTryMs < WIFI_RETRY_INTERVAL_MS) return;
+  lastWifiTryMs = now;
+
+  Serial.println("Wi-Fi disconnected; retrying...");
+  WiFi.disconnect(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+}
+
+void setupOTAIfConnected() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+
+  ArduinoOTA.onStart([]() { Serial.println("OTA Start"); });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA End"); });
+  ArduinoOTA.onError([](ota_error_t err) { Serial.printf("OTA Error[%u]\n", err); });
+
+  ArduinoOTA.begin();
+  Serial.println("OTA ready.");
+}
+
+// =====================
+// Setup / Loop
+// =====================
+void setup() {
+  Serial.begin(115200);
+  delay(100);
+
+  // USB MIDI
+  USB.begin();
+  MIDI.begin();
+
+  // ADC + pins
+  analogReadResolution(12);
+  pinMode(POT_PIN, INPUT);
+  pinMode(BOOT_PIN, INPUT_PULLUP);
+
+  // NeoPixel
+  rgb.begin();
+  rgb.setBrightness(50);
+  rgb.clear();
+  rgb.show();
+
+  // NVS
+  prefs.begin("pedalcal", false);
+  bool hadCal = hasSavedCalibration();
+  loadCalibration();
+
+  // OLED
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(200000);
+  u8g2.begin();
+
+  // Wi-Fi + OTA
+  connectWiFiWithTimeout();
+  setupOTAIfConnected();
+
+  // If no saved calibration exists, calibrate once at startup
+  if (!hadCal) {
+    calibratePedal(true);
+  }
+}
+
+void loop() {
+  // Keep Wi-Fi/OTA alive
+  maintainWiFi();
+  if (WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
+
+  // Handle BOOT press UI / trigger calibration (5s hold)
+  handleBootButtonCalibration();
+
+  // ----- Always keep MIDI running -----
+  int raw = analogRead(POT_PIN);
+  if (!smoothInit) {
+    smoothRaw = raw;
+    smoothInit = true;
+  } else {
+    smoothRaw += SMOOTH_ALPHA * (raw - smoothRaw);
+  }
+
+  int mn = calibMin, mx = calibMax;
+  if (mn > mx) { int t = mn; mn = mx; mx = t; }
+  if (mx - mn < CAL_MIN_SPAN) { mn = 0; mx = 4095; }
+
+  uint8_t midi = map(constrain((int)smoothRaw, mn, mx), mn, mx, 0, 127);
+
+  if (lastMidiSent == 255) lastMidiSent = midi;
+
+  if (abs((int)midi - (int)lastMidiSent) > MIDI_DEADBAND &&
+      (millis() - lastMidiMs) > MIDI_RATE_MS) {
+    MIDI.controlChange(CONTROLLER_NUM, midi, MIDI_CHANNEL);
+    lastMidiSent = midi;
+    lastMidiMs = millis();
+  }
+
+  // ----- UI updates -----
+  // If hold UI is active, don't overwrite it with normal UI/LED.
+  if (!holdUiActive) {
+    if (midi != lastLedMidi) {
+      setPedalColor(midi);
+      lastLedMidi = midi;
+    }
+    updateDisplay(midi);
+  }
 }
