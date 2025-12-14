@@ -31,8 +31,9 @@ const int POT_PIN   = 4;
 const int RGB_PIN   = 48;
 const int RGB_COUNT = 1;
 
-// static constexpr int BOOT_PIN = 0;                 // GPIO0, active ALLREADY DEFINED
-static constexpr uint32_t BOOT_HOLD_MS = 5000;     // <<< 5 seconds
+// BOOT button (ESP32-S3)
+// static constexpr int BOOT_PIN = 0;                 // GPIO0, active LOW
+static constexpr uint32_t BOOT_HOLD_MS = 5000;     // 5 seconds
 
 // =====================
 // OLED Configuration
@@ -91,6 +92,10 @@ uint32_t lastWifiTryMs = 0;
 // =====================
 // Calibration storage
 // =====================
+bool hasSavedCalibration() {
+  return prefs.isKey("min") && prefs.isKey("max");
+}
+
 bool validateCalibration() {
   int mn = calibMin, mx = calibMax;
   if (mn > mx) { int t = mn; mn = mx; mx = t; }
@@ -103,11 +108,10 @@ void saveCalibration() {
 }
 
 void loadCalibration() {
-  if (prefs.isKey("min") && prefs.isKey("max")) {
+  if (hasSavedCalibration()) {
     calibMin = prefs.getInt("min", 0);
     calibMax = prefs.getInt("max", 4095);
   } else {
-    // No saved calibration: keep safe defaults (full ADC range).
     calibMin = 0;
     calibMax = 4095;
   }
@@ -243,8 +247,7 @@ void calibratePedal(bool force) {
 
 // =====================
 // BOOT button handler
-// Sets holdUiActive to prevent normal UI overwrite.
-// Triggers calibration after 5 seconds.
+// (only triggers calibration after 5s hold)
 // =====================
 void handleBootButtonCalibration() {
   bool pressed = (digitalRead(BOOT_PIN) == LOW);
@@ -269,6 +272,7 @@ void handleBootButtonCalibration() {
   if (bootPressStart == 0) bootPressStart = millis();
   uint32_t held = millis() - bootPressStart;
 
+  // Throttle hold UI + LED
   uint32_t now = millis();
   if (now - lastHoldUiMs >= HOLD_UI_PERIOD_MS) {
     lastHoldUiMs = now;
@@ -364,8 +368,9 @@ void setup() {
   rgb.clear();
   rgb.show();
 
-  // Load saved calibration ONLY (no calibration at startup)
+  // NVS
   prefs.begin("pedalcal", false);
+  bool hadCal = hasSavedCalibration();
   loadCalibration();
 
   // OLED
@@ -376,6 +381,11 @@ void setup() {
   // Wi-Fi + OTA
   connectWiFiWithTimeout();
   setupOTAIfConnected();
+
+  // If no saved calibration exists, calibrate once at startup
+  if (!hadCal) {
+    calibratePedal(true);
+  }
 }
 
 void loop() {
@@ -383,7 +393,7 @@ void loop() {
   maintainWiFi();
   if (WiFi.status() == WL_CONNECTED) ArduinoOTA.handle();
 
-  // Handle BOOT press UI / trigger calibration
+  // Handle BOOT press UI / trigger calibration (5s hold)
   handleBootButtonCalibration();
 
   // ----- Always keep MIDI running -----
