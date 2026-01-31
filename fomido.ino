@@ -10,14 +10,14 @@
 // =====================
 // Wi-Fi / OTA
 // =====================
-const char* WIFI_SSID = "FritzseBadmuts";
-const char* WIFI_PASS = "There is no sp00n!";
+const char* WIFI_SSID = "SSID";
+const char* WIFI_PASS = "Password";
 
 static constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 static constexpr uint32_t WIFI_RETRY_INTERVAL_MS  = 10000;
 
 static const char* OTA_HOSTNAME = "ESP32S3-FootCtrl";
-static const char* OTA_PASSWORD = "Nexus8";
+static const char* OTA_PASSWORD = "OTAPassword";
 
 // =====================
 // USB / MIDI
