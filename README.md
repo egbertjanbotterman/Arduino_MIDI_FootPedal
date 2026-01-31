@@ -136,11 +136,12 @@ Credentials and OTA password are defined in the sketch.
 
 ## License
 
-MIT (or choose your own)
+- Free for personal, educational, and open-source use
+- Commercial use requires written permission or a paid license
 
 ---
 
 ## Author
 
-Built by **Egberts**  
+Built by **Egbert Jan Botterman**  
 ESP32-S3 USB MIDI Foot Controller
